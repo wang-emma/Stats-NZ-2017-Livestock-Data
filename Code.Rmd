@@ -1,0 +1,350 @@
+---
+title: "STATS NZ Agricultural Census 2017"
+author: "Emma Wang"
+date: '2022-07-15'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load("readxl", "tidyverse", "ggplot2", "naniar", "sf", "spData", 
+               "gganimate", "transformr")
+```
+
+# Data Importation and Wrangling
+Data Source: Stats NZ Agricultural production statistics: June 2017 (final)  
+https://www.stats.govt.nz/information-releases/agricultural-production-statistics-june-2017-final
+
+```{r  dataImportation}
+# Define the URL 
+URL = "https://www.stats.govt.nz/assets/Uploads/Agricultural-production-statistics/Agricultural-production-statistics-June-2017-final/Download-data/agricultural-production-statistics-jun17-final-tables-v2.xlsx"
+
+# Download the xlsx
+download.file(URL, destfile="agricultural-production-statistics-jun17-final-tables-v2.xlsx", quiet = TRUE, mode = "wb")
+
+# Import Data
+data_raw <- read_xlsx("agricultural-production-statistics-jun17-final-tables-v2.xlsx", 
+                      sheet = 2, skip = 9, col_names = FALSE)
+
+# Remove the unwanted rows and columns
+## The ones with complete NAs and Total Numbers
+data <- data_raw %>%
+  select(seq(1,19, by = 2)) %>%
+  filter(complete.cases(.) & !grepl("^Total", `...1`))
+
+# Change column names
+name <- expand.grid(x = c('2012_count', '2017_count', '%change'),
+            y = c('sheep', 'dairy cattle', 'beef cattle')) %>%
+    mutate(nn = paste(x, y, sep = '_')) %>%
+    pull(nn)
+col_names <- c("Region", name)
+
+names(data) <- col_names
+
+
+# Deal with character input (S, C or -). Treat them as NA
+data <- as.tibble(apply(data, 2, function(x) 
+  str_replace_all(x, '^([CS-])$', NA_character_)))
+
+# Change data types in each column
+data[all_of(name)] <- sapply(data[name], as.numeric)
+
+
+```
+
+Now we separate the data into 2 different data sets, because typically percentage changes and counts are not plotted on the same scales.  
+```{r dataSep}
+data_change <- data %>% select(Region, contains("%change"))
+data_count <- data %>% select(Region, contains("Count"))
+```
+
+## Convert to long formats
+Turn `data_change` into a long format.  
+```{r LongFormat1}
+data_change <- data_change %>% 
+  pivot_longer(!Region, values_to = "Changes", names_to = "Livestock") %>%
+  mutate(Livestock = str_replace(Livestock, "%change_", ""),
+         Changes = round(Changes, 1)) %>% # Rounding 
+  arrange(Livestock)
+  
+head(data_change)
+```
+
+Turn `data_count` into a long format.  
+```{r LongFormat2}
+data_count <- data_count %>% 
+  pivot_longer(!Region, values_to = "Count (thousands)", names_to = "Names") %>%
+  separate(2, into = c("Year", "Livestock"), sep = "_count_")
+  
+head(data_count)
+```
+
+
+# Visual Exploration
+## Maps
+`nz` is a simple feature data set in `spData` package, which contains the outlines of the 16 regions in North Island and South Island. 
+```{r Mergesf}
+countsf <- merge(spData::nz, data_count, by.x = "Name", by.y = "Region")
+```
+
+
+
+```{r}
+mapnz <- 
+  countsf %>%
+  ggplot() + 
+  geom_sf() +
+  geom_sf_label(data = filter(nz, 
+                              !Name %in% c("Tasman", "Taranaki", 
+                                           "Bay of Plenty", "Waikato", 
+                                           "Manawatu-Wanganui", "Marlborough")),
+                mapping = aes(label = Name),
+                label.padding = unit(1, "mm"), size = 2) +
+  geom_sf_label(data = filter(nz, Name %in% c("Taranaki", "Bay of Plenty")),
+                mapping = aes(label = Name),
+                label.padding = unit(1, "mm"), size = 2, 
+                nudge_y = 20000) +
+  geom_sf_label(data = filter(nz, Name %in% c("Waikato", "Tasman")),
+                mapping = aes(label = Name),
+                label.padding = unit(1, "mm"), size = 2, 
+                nudge_x = -50000) +
+  geom_sf_label(data = filter(nz, Name %in% c("Waikato")),
+                mapping = aes(label = Name),
+                label.padding = unit(1, "mm"), size = 2, 
+                nudge_x = -50000) +
+  geom_sf_label(data = filter(nz, Name == "Manawatu-Wanganui"),
+                mapping = aes(label = Name),
+                label.padding = unit(1, "mm"), size = 2, 
+                nudge_y = -50000) +
+  geom_sf_label(data = filter(nz, Name %in% c("Marlborough")),
+                mapping = aes(label = Name),
+                label.padding = unit(1, "mm"), size = 2, 
+                nudge_y = -25000) +
+  theme_bw() +
+  labs(x = "Latitude", y = "Longitude")
+
+ggsave("Figures/mapnz.jpg", mapnz)
+```
+
+
+* Map of Chatham Islands  
+The outlines of Chatham Islands are not included in the `spData` package.  
+The map data `nz-chatham-island-island-polygons-topo-150k.csv` were downloaded from Land Information New Zealand:  
+https://data.linz.govt.nz/layer/50086-nz-chatham-island-island-polygons-topo-150k/metadata/
+
+```{r}
+mapc <- st_read("nz-chatham-island-island-polygons-topo-150k.csv")
+
+mapci <- 
+  mapc %>%
+  ggplot() +
+  geom_sf() +
+  geom_label(aes(x = 3513000, y = 5140000, label = "Chatham Islands")) +
+  theme(panel.grid.major = element_blank(),
+        panel.background = element_rect(fill = "white", colour = "black"), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+
+# ggsave("Figures/mapci.jpg", mapci)
+
+mapci
+```
+
+Below are 2 function to plot the choropleth maps for the 2 main islands and Chatham Islands.  
+
+```{r functions}
+# 2 functions to create the choropleth maps
+## Main islands
+plot_map <- function(live, year = 2017, data = countsf){
+  out <- data %>%
+    filter(Livestock == live & Year == year) %>%
+    ggplot() + 
+    geom_sf(aes(fill = `Count (thousands)`)) +
+    ggtitle(paste("Total counts of", live, "in", year, "by regions")) +
+    theme_bw() +
+    labs(x = "Latitude", y = "Longitude") +
+    scale_fill_distiller(palette = "Greens",
+                         limits = c(min(data %>% 
+                                          filter(Year == year & 
+                                                   Livestock == live) %>%
+                                          pull(`Count (thousands)`), 
+                                        na.rm = T),
+                                    max(data %>% 
+                                            filter(Year == year & 
+                                                   Livestock == live) %>%
+                                          pull(`Count (thousands)`), 
+                                        na.rm = T)))
+  return(out)
+}
+
+## Chatham Islands
+plot_chatham <- function(live, year = 2017, data = mapc, main_data = data_count) {
+  # Count of sheep of Chatham Islands
+  countc <- data_count %>% 
+    filter(Year == year & Livestock == live & 
+             Region == "Chatham Islands") %>%
+  pull(`Count (thousands)`)
+
+  # Plot the map of Chatham Island
+  out <- data %>%
+    ggplot() +
+    geom_sf(aes(fill = countc)) +
+    theme(panel.grid.major = element_blank(),
+          panel.background = element_rect(fill = "white", colour = "black"), 
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank()) +
+    scale_fill_distiller(name = "Count (thousands)", 
+                         palette = "Greens", 
+                         limits = c(min(main_data %>% 
+                                          filter(Year == year & 
+                                                   Livestock == live) %>%
+                                          select(`Count (thousands)`), 
+                                        na.rm = T),
+                                    max(main_data %>% 
+                                          filter(Year == year & 
+                                                   Livestock == live) %>%
+                                          select(`Count (thousands)`), 
+                                        na.rm = T)))
+  return(out)
+}
+```
+
+
+### Sheep
+```{r sheepMap}
+# Main islands
+count_sheep_2017 <- plot_map("sheep")
+count_sheep_2017
+# Save the map
+# ggsave("Figures/count_sheep_2017.jpg", count_sheep_2017)
+
+
+# Chatham Islands
+count_sheep_2017_c <- plot_chatham("sheep")
+count_sheep_2017_c
+
+# Save the map
+# ggsave("Figures/count_sheep_2017_c.jpg", count_sheep_2017_c)
+```
+
+
+### beef cattle
+```{r beefMap}
+# Main islands
+count_beef_2017 <- plot_map("beef cattle")
+count_beef_2017
+# Save the map
+# ggsave("Figures/count_beef_2017.jpg", count_beef_2017)
+
+
+# Chatham Islands
+count_beef_2017_c <- plot_chatham("beef cattle")
+count_beef_2017_c
+
+# Save the map
+# ggsave("Figures/count_beef_2017_c.jpg", count_beef_2017_c)
+```
+
+### dairy cattle
+```{r dairyMap}
+# Main islands
+count_dairy_2017 <- plot_map("dairy cattle")
+count_dairy_2017
+# Save the map
+# ggsave("Figures/count_dairy_2017.jpg", count_dairy_2017)
+
+# The data for Chatham Islands are unavailable
+
+
+```
+
+
+
+## Changes in counts
+### Sheep
+```{r sheepCountsNorth}
+# A function to plot the animation
+plot_anim <- function(live, island, data = data_count, 
+                      add_expand = 500){
+  north <- c("Northland", "Auckland", "Waikato", "Bay of Plenty", 
+           "Gisborne", "Taranaki", "Hawke's Bay",
+           "Manawatu-Wanganui", "Wellington")
+  south <- c("Nelson", "Tasman", "Marlborough", "West Coast",
+             "Canterbury", "Otago", "Southland", "Chatham Islands")
+  if(island == "North") {regions <- north
+  }else{
+    regions <- south
+  }
+  
+  # An animation of livestock counts, North Island
+out <- 
+  data_count %>% 
+  filter(Livestock == live & Region %in% regions) %>%
+  ggplot(aes(x = Region, y = `Count (thousands)`)) +
+  geom_col(fill = "#778C3C") +
+  scale_y_continuous(expand = expansion(add = c(0, add_expand))) +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_line(colour = "grey"),
+        panel.background = element_rect(colour = "black", fill = "white"))+
+  transition_states(Year, wrap = FALSE) +
+  ggtitle(paste("{closest_state}", live, "Counts on the", island, "Island")) +
+  enter_fade() +
+  exit_fade()
+
+  return(out)
+}
+
+# Draw the animation
+anim_sheep_north <- plot_anim("sheep", "North")
+
+# Save
+# anim_save("Figures/sheep_north.gif", animate(anim_sheep_north, fps = 8, nframes = 64, height = 480, width = 600))
+```
+
+```{r sheepCountsSouth}
+# Sheep counts for the South island
+anim_sheep_south <- plot_anim("sheep", "South")
+
+
+# anim_save("Figures/sheep_south.gif", animate(anim_sheep_south, fps = 8, nframes = 64, height = 480, width = 600))
+```
+
+### Beef Cattle
+```{r beefCountsNorth}
+# Beef cattle counts on the North island
+anim_beef_north <- plot_anim("beef cattle", "North", add_expand = 50)
+
+
+# anim_save("Figures/beef_north.gif", animate(anim_beef_north, fps = 8, nframes = 64, height = 480, width = 600))
+```
+
+```{r beefCountsNorth}
+# Beef cattle counts on the North island
+anim_beef_south <- plot_anim("beef cattle", "South", add_expand = 50)
+
+
+# anim_save("Figures/beef_south.gif", animate(anim_beef_south, fps = 8, nframes = 64, height = 480, width = 600))
+```
+
+
+
+
+### Dairy Cattle
+```{r dairyCountsNorth}
+# Beef cattle counts on the North island
+anim_dairy_north <- plot_anim("dairy cattle", "North", add_expand = 50)
+
+
+# anim_save("Figures/dairy_north.gif", animate(anim_dairy_north, fps = 8, nframes = 64, height = 480, width = 600))
+```
+
+```{r beefCountsNorth}
+# Beef cattle counts on the North island
+anim_dairy_south <- plot_anim("dairy cattle", "South", add_expand = 50)
+
+
+# anim_save("Figures/dairy_south.gif", animate(anim_dairy_south, fps = 8, nframes = 64, height = 480, width = 600))
+```
