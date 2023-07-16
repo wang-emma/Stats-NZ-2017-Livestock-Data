@@ -9,7 +9,7 @@ https://www.stats.govt.nz/information-releases/agricultural-production-statistic
 https://data.linz.govt.nz/layer/50086-nz-chatham-island-island-polygons-topo-150k/metadata/  
 
 # Navigation of Files 
-* `agricultural-production-statistics-jun17-final-tables-v2.csv`: The data source in `.xlsx` format. Only Table 1 (Sheet 2) was used in the analitics  
+* `agricultural-production-statistics-jun17-final-tables-v2.csv`: The data source in `.xlsx` format. Only Table 1 (Sheet 2) was used in the analytics  
 * `nz-chatham-island-island-polygons-topo-150k.csv`: the outlines of the Chatham Islands. 
 * `Code.Rmd`: The R code for presentation  
 * `Presentation.ppt`: The slides of the presentation  
